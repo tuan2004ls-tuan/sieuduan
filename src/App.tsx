@@ -13,7 +13,7 @@ function formatMoney(val) {
 }
 
 function calcNextBet(currentBet, wonAmount) {
-  return (currentBet * 2 - wonAmount) / 2;
+  return (currentBet * 2 - wonAmount) / 1.95;
 }
 
 export default function App() {
