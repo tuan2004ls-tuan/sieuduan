@@ -1,19 +1,26 @@
 import React, { useState, useEffect } from "react";
 
 const INITIAL_BET = 10;
-const STORAGE_KEY = "betting_tool_state_v2";
+const STORAGE_KEY = "betting_tool_state_v3";
 
 function formatMoney(val) {
   return (
     (Number(val) || 0).toLocaleString("vi-VN", {
       minimumFractionDigits: 0,
-      maximumFractionDigits: 1.95,
-    }) + "tr"
+      maximumFractionDigits: 2,
+    }) + "k"
   );
 }
 
-function calcNextBet(currentBet, wonAmount) {
-  return (currentBet * 2 - wonAmount) / 1.95;
+function calcNextBetOnWin(currentBet, wonAmount) {
+  return (currentBet * 2 - wonAmount) / 2;
+}
+
+// Tổng quát hoá công thức thua: thua hết (mất 100% cược) -> x1.5,
+// thua nửa (mất 50% cược) -> x1.25. Hai điểm này nằm trên 1 đường thẳng:
+// lượt sau = cược hiện tại + 0.5 x (số tiền đã thua)
+function calcNextBetOnLoss(currentBet, lostAmount) {
+  return currentBet + 0.5 * lostAmount;
 }
 
 export default function App() {
@@ -23,14 +30,17 @@ export default function App() {
   const [round, setRound] = useState(1);
   const [totalLost, setTotalLost] = useState(0);
   const [totalWon, setTotalWon] = useState(0);
+  const [isLoaded, setIsLoaded] = useState(false);
 
   // UI Interactive States
   const [wonInput, setWonInput] = useState("");
   const [showWonInput, setShowWonInput] = useState(false);
+  const [loseInput, setLoseInput] = useState("");
+  const [showLoseInput, setShowLoseInput] = useState(false);
   const [isEditingBet, setIsEditingBet] = useState(false);
   const [editBetInput, setEditBetInput] = useState("");
 
-  // Load state from localStorage on mount
+  // Load state from artifact storage on mount
   useEffect(() => {
     // Inject iOS PWA Meta Tags dynamically for seamless "Add to Home Screen" experience
     const metaTags = [
@@ -57,26 +67,42 @@ export default function App() {
       el.setAttribute("content", tag.content);
     });
 
-    const savedState = localStorage.getItem(STORAGE_KEY);
-    if (savedState) {
+    let mounted = true;
+    (async () => {
       try {
-        const parsed = JSON.parse(savedState);
-        if (parsed.history) setHistory(parsed.history);
-        if (parsed.currentBet !== undefined) setCurrentBet(parsed.currentBet);
-        if (parsed.round !== undefined) setRound(parsed.round);
-        if (parsed.totalLost !== undefined) setTotalLost(parsed.totalLost);
-        if (parsed.totalWon !== undefined) setTotalWon(parsed.totalWon);
+        const saved = localStorage.getItem(STORAGE_KEY);
+        if (mounted && saved) {
+          const parsed = JSON.parse(saved); // Bỏ .value đi vì localStorage trả về chuỗi trực tiếp
+          if (parsed.history) setHistory(parsed.history);
+          if (parsed.currentBet !== undefined) setCurrentBet(parsed.currentBet);
+          if (parsed.round !== undefined) setRound(parsed.round);
+          if (parsed.totalLost !== undefined) setTotalLost(parsed.totalLost);
+          if (parsed.totalWon !== undefined) setTotalWon(parsed.totalWon);
+        }
       } catch (e) {
-        console.error("Error loading local storage state", e);
+        // Chưa có dữ liệu lưu trước đó - bình thường ở lần chạy đầu
+      } finally {
+        if (mounted) setIsLoaded(true);
       }
-    }
+    })();
+
+    return () => {
+      mounted = false;
+    };
   }, []);
 
-  // Save state to localStorage whenever it changes
+  // Save state to artifact storage whenever it changes (sau khi đã load xong)
   useEffect(() => {
-    const stateToSave = { history, currentBet, round, totalLost, totalWon };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(stateToSave));
-  }, [history, currentBet, round, totalLost, totalWon]);
+    if (!isLoaded) return;
+    (async () => {
+      try {
+        const stateToSave = { history, currentBet, round, totalLost, totalWon };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(stateToSave)); // Dùng localStorage.setItem
+      } catch (e) {
+        console.error("Lỗi khi lưu dữ liệu:", e);
+      }
+    })();
+  }, [history, currentBet, round, totalLost, totalWon, isLoaded]);
 
   // Helper to append history and keep only the latest 20 items
   const updateHistory = (newItem) => {
@@ -86,62 +112,94 @@ export default function App() {
     });
   };
 
-  function handleLose() {
-    const nextBet = Math.round(currentBet * 1.5 * 100) / 100;
-    const timestamp = new Date().toLocaleTimeString("vi-VN", {
+  function getTimestamp() {
+    return new Date().toLocaleTimeString("vi-VN", {
       hour: "2-digit",
       minute: "2-digit",
     });
+  }
+
+  function handleLose() {
+    const lost = currentBet;
+    const nextBet = Math.max(
+      0,
+      Math.round(calcNextBetOnLoss(currentBet, lost) * 100) / 100
+    );
 
     updateHistory({
       round,
       bet: currentBet,
       result: "thua hết",
+      lost,
       won: 0,
       nextBet,
-      time: timestamp,
+      time: getTimestamp(),
     });
-    setTotalLost((p) => p + currentBet);
+    setTotalLost((p) => p + lost);
     setCurrentBet(nextBet);
     setRound((r) => r + 1);
     setShowWonInput(false);
+    setShowLoseInput(false);
     setWonInput("");
+    setLoseInput("");
   }
 
   function handleHalfLose() {
-    const nextBet = Math.round(currentBet * 1.25 * 100) / 100;
-    const timestamp = new Date().toLocaleTimeString("vi-VN", {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    const lost = currentBet / 2;
+    const nextBet = Math.max(
+      0,
+      Math.round(calcNextBetOnLoss(currentBet, lost) * 100) / 100
+    );
 
     updateHistory({
       round,
       bet: currentBet,
       result: "thua nửa",
+      lost,
       won: 0,
       nextBet,
-      time: timestamp,
+      time: getTimestamp(),
     });
-    setTotalLost((p) => p + currentBet / 2);
+    setTotalLost((p) => p + lost);
     setCurrentBet(nextBet);
     setRound((r) => r + 1);
     setShowWonInput(false);
+    setShowLoseInput(false);
     setWonInput("");
+    setLoseInput("");
+  }
+
+  function handleLoseConfirm() {
+    const raw = parseFloat(loseInput);
+    if (isNaN(raw) || raw <= 0) return;
+    // Không thể thua nhiều hơn số tiền đã đặt cược
+    const lost = Math.min(raw, currentBet);
+    const nextBet = Math.max(
+      0,
+      Math.round(calcNextBetOnLoss(currentBet, lost) * 100) / 100
+    );
+
+    updateHistory({
+      round,
+      bet: currentBet,
+      result: "thua khác",
+      lost,
+      won: 0,
+      nextBet,
+      time: getTimestamp(),
+    });
+    setTotalLost((p) => p + lost);
+    setCurrentBet(nextBet);
+    setRound((r) => r + 1);
+    setShowLoseInput(false);
+    setLoseInput("");
   }
 
   function handleWinConfirm() {
     const won = parseFloat(wonInput);
     if (isNaN(won) || won <= 0) return;
-    const next = calcNextBet(currentBet, won);
-
-    // Đã sửa giới hạn tối thiểu về 0 (cho phép tiền cược tụt xuống dưới 10tr)
+    const next = calcNextBetOnWin(currentBet, won);
     const safeNext = Math.max(0, Math.round(next * 100) / 100);
-
-    const timestamp = new Date().toLocaleTimeString("vi-VN", {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
 
     updateHistory({
       round,
@@ -149,7 +207,7 @@ export default function App() {
       result: "thắng",
       won,
       nextBet: safeNext,
-      time: timestamp,
+      time: getTimestamp(),
     });
     setTotalWon((p) => p + won);
     setCurrentBet(safeNext);
@@ -176,27 +234,31 @@ export default function App() {
       setCurrentBet(INITIAL_BET);
       setRound(1);
       setWonInput("");
+      setLoseInput("");
       setShowWonInput(false);
+      setShowLoseInput(false);
       setTotalLost(0);
       setTotalWon(0);
-      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(STORAGE_KEY); // Dùng localStorage.removeItem
     }
   }
 
   const netPnL = totalWon - totalLost;
+  const loseInputVal = parseFloat(loseInput);
+  const wonInputVal = parseFloat(wonInput);
 
   // Premium Luxury Color Palette (Midnight Sapphire & Brushed Gold Accents)
   const colors = {
-    bg: "#0A0E1A", // Deep dark luxury background
-    cardBg: "#131A30", // Solid premium container color
-    cardBorder: "#232D4B", // Sophisticated subtle frame
-    textMain: "#F4F6FA", // Elegant cream-white
-    textMuted: "#7E8B9B", // Soft clean gray
-    gold: "#D4AF37", // Luxury accent gold
-    goldLight: "#F3E5AB", // Soft secondary gold
-    red: "#E05656", // Crimson for full loss
-    orange: "#E29543", // Warm amber for half loss
-    green: "#4EAF6F", // Deep jade emerald for wins
+    bg: "#0A0E1A",
+    cardBg: "#131A30",
+    cardBorder: "#232D4B",
+    textMain: "#F4F6FA",
+    textMuted: "#7E8B9B",
+    gold: "#D4AF37",
+    goldLight: "#F3E5AB",
+    red: "#E05656",
+    orange: "#E29543",
+    green: "#4EAF6F",
   };
 
   return (
@@ -225,7 +287,7 @@ export default function App() {
           gap: 18,
         }}
       >
-        {/* iOS Top Bar Indicator / Elegant Header */}
+        {/* Header */}
         <div style={{ textAlign: "center", marginTop: 8, marginBottom: 4 }}>
           <div
             style={{
@@ -376,11 +438,11 @@ export default function App() {
         </div>
 
         {/* Action Panel */}
-        {!showWonInput ? (
+        {!showWonInput && !showLoseInput ? (
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "1fr 1fr 1.1fr",
+              gridTemplateColumns: "1fr 1fr",
               gap: 10,
             }}
           >
@@ -435,6 +497,31 @@ export default function App() {
             </button>
 
             <button
+              onClick={() => setShowLoseInput(true)}
+              style={{
+                padding: "16px 8px",
+                background: "#22161B",
+                border: `1px solid rgba(224, 86, 86, 0.3)`,
+                borderRadius: 16,
+                color: colors.red,
+                fontSize: 14,
+                fontWeight: 700,
+                cursor: "pointer",
+                lineHeight: 1.4,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: 4,
+              }}
+            >
+              <span style={{ fontSize: 18 }}>📉</span>
+              <span>Thua Khác</span>
+              <span style={{ fontSize: 10, fontWeight: 500, opacity: 0.6 }}>
+                Nhập số tiền
+              </span>
+            </button>
+
+            <button
               onClick={() => setShowWonInput(true)}
               style={{
                 padding: "16px 8px",
@@ -455,10 +542,123 @@ export default function App() {
               <span style={{ fontSize: 18 }}>🏆</span>
               <span>Thắng</span>
               <span style={{ fontSize: 10, fontWeight: 500, opacity: 0.6 }}>
-                {" "}
                 Khớp lệnh thực nhận
               </span>
             </button>
+          </div>
+        ) : showLoseInput ? (
+          <div
+            style={{
+              background: colors.cardBg,
+              border: `1px solid ${colors.cardBorder}`,
+              borderRadius: 18,
+              padding: 18,
+              boxShadow: "0 8px 24px rgba(0,0,0,0.2)",
+            }}
+          >
+            <div
+              style={{
+                fontSize: 13,
+                color: colors.red,
+                marginBottom: 10,
+                fontWeight: 600,
+              }}
+            >
+              Nhập số tiền đã thua thực tế (k):
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                type="number"
+                value={loseInput}
+                onChange={(e) => setLoseInput(e.target.value)}
+                placeholder="Ví dụ: 15"
+                style={{
+                  flex: 1,
+                  padding: "12px 14px",
+                  background: colors.bg,
+                  border: `1px solid ${colors.cardBorder}`,
+                  borderRadius: 12,
+                  color: "#fff",
+                  fontSize: 18,
+                  fontWeight: 700,
+                  outline: "none",
+                }}
+                autoFocus
+                onKeyDown={(e) => e.key === "Enter" && handleLoseConfirm()}
+              />
+              <button
+                onClick={handleLoseConfirm}
+                style={{
+                  padding: "12px 22px",
+                  background: colors.red,
+                  border: "none",
+                  borderRadius: 12,
+                  color: "#fff",
+                  fontSize: 16,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                ✓
+              </button>
+              <button
+                onClick={() => {
+                  setShowLoseInput(false);
+                  setLoseInput("");
+                }}
+                style={{
+                  padding: "12px 16px",
+                  background: "rgba(224, 86, 86, 0.15)",
+                  border: "none",
+                  borderRadius: 12,
+                  color: colors.red,
+                  fontSize: 14,
+                  cursor: "pointer",
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {loseInput && !isNaN(loseInputVal) && loseInputVal > 0 && (
+              <div
+                style={{
+                  marginTop: 12,
+                  fontSize: 11,
+                  color: colors.textMuted,
+                  lineHeight: 1.5,
+                }}
+              >
+                Dự kiến lượt kế tiếp:{" "}
+                <span style={{ color: colors.gold, fontWeight: 700 }}>
+                  {formatMoney(
+                    Math.max(
+                      0,
+                      Math.round(
+                        calcNextBetOnLoss(
+                          currentBet,
+                          Math.min(loseInputVal, currentBet)
+                        ) * 100
+                      ) / 100
+                    )
+                  )}
+                </span>
+                <br />
+                <span style={{ fontStyle: "italic" }}>
+                  Công thức: {formatMoney(currentBet)} + 0.5 ×{" "}
+                  {formatMoney(Math.min(loseInputVal, currentBet))}
+                </span>
+                {loseInputVal > currentBet && (
+                  <>
+                    <br />
+                    <span style={{ color: colors.red }}>
+                      ⚠️ Không thể thua nhiều hơn tiền cược (
+                      {formatMoney(currentBet)}) — đã tự giới hạn lại.
+                    </span>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         ) : (
           <div
@@ -478,7 +678,7 @@ export default function App() {
                 fontWeight: 600,
               }}
             >
-              Nhập chính xác số tiền thắng thực tế (tr):
+              Nhập chính xác số tiền thắng thực tế (k):
             </div>
             <div style={{ display: "flex", gap: 8 }}>
               <input
@@ -534,35 +734,33 @@ export default function App() {
               </button>
             </div>
 
-            {wonInput &&
-              !isNaN(parseFloat(wonInput)) &&
-              parseFloat(wonInput) > 0 && (
-                <div
-                  style={{
-                    marginTop: 12,
-                    fontSize: 11,
-                    color: colors.textMuted,
-                    lineHeight: 1.5,
-                  }}
-                >
-                  Dự kiến lượt kế tiếp:{" "}
-                  <span style={{ color: colors.gold, fontWeight: 700 }}>
-                    {formatMoney(
-                      Math.max(
-                        0,
-                        Math.round(
-                          calcNextBet(currentBet, parseFloat(wonInput)) * 100
-                        ) / 100
-                      )
-                    )}
-                  </span>
-                  <br />
-                  <span style={{ fontStyle: "italic" }}>
-                    Công thức: ( {formatMoney(currentBet)} × 2 −{" "}
-                    {formatMoney(parseFloat(wonInput))} ) / 2
-                  </span>
-                </div>
-              )}
+            {wonInput && !isNaN(wonInputVal) && wonInputVal > 0 && (
+              <div
+                style={{
+                  marginTop: 12,
+                  fontSize: 11,
+                  color: colors.textMuted,
+                  lineHeight: 1.5,
+                }}
+              >
+                Dự kiến lượt kế tiếp:{" "}
+                <span style={{ color: colors.gold, fontWeight: 700 }}>
+                  {formatMoney(
+                    Math.max(
+                      0,
+                      Math.round(
+                        calcNextBetOnWin(currentBet, wonInputVal) * 100
+                      ) / 100
+                    )
+                  )}
+                </span>
+                <br />
+                <span style={{ fontStyle: "italic" }}>
+                  Công thức: ( {formatMoney(currentBet)} × 2 −{" "}
+                  {formatMoney(wonInputVal)} ) / 2
+                </span>
+              </div>
+            )}
           </div>
         )}
 
@@ -689,6 +887,13 @@ export default function App() {
                   : isHalf
                   ? "rgba(226, 149, 67, 0.12)"
                   : "rgba(224, 86, 86, 0.12)";
+                const fallbackLost =
+                  h.result === "thua hết"
+                    ? h.bet
+                    : h.result === "thua nửa"
+                    ? h.bet / 2
+                    : 0;
+                const displayLost = h.lost ?? fallbackLost;
 
                 return (
                   <div
@@ -734,7 +939,9 @@ export default function App() {
                           <span style={{ color: badgeColor, fontWeight: 600 }}>
                             {h.result}
                           </span>
-                          {isWin && ` (+${formatMoney(h.won)})`}
+                          {isWin
+                            ? ` (+${formatMoney(h.won)})`
+                            : ` (-${formatMoney(displayLost)})`}
                         </div>
                       </div>
                     </div>
@@ -775,7 +982,7 @@ export default function App() {
           )}
         </div>
 
-        {/* Global Reset and Instructions Section */}
+        {/* Global Reset */}
         {history.length > 0 && (
           <button
             onClick={handleReset}
@@ -800,7 +1007,7 @@ export default function App() {
           </button>
         )}
 
-        {/* Premium Formula / PWA Guide Footer */}
+        {/* Footer */}
         <div
           style={{
             marginTop: 6,
@@ -822,22 +1029,14 @@ export default function App() {
               letterSpacing: "0.5px",
             }}
           >
-            HƯỚNG DẪN CÀI ĐẶT ỨNG DỤNG TRÊN IPHONE
+            CÔNG THỨC
           </div>
-          1. Mở liên kết này bằng trình duyệt{" "}
-          <strong style={{ color: "#fff" }}>Safari</strong> trên iPhone.
+          Thua hết → ×1.5 · Thua nửa → ×1.25 · Thua khác → cược + 0.5×(số tiền
+          thua)
           <br />
-          2. Bấm vào biểu tượng{" "}
-          <strong style={{ color: colors.gold }}>Share (Chia sẻ)</strong> ở
-          thanh menu dưới cùng.
+          Thắng: ( Cược × 2 − Thắng ) / 2
           <br />
-          3. Chọn{" "}
-          <strong style={{ color: "#fff" }}>
-            "Thêm vào MH chính" (Add to Home Screen)
-          </strong>
-          .<br />
-          Ứng dụng sẽ tự động lưu trữ 20 phiên cược gần nhất vào bộ nhớ máy,
-          hoạt động mượt mà độc lập như một app iOS xịn.
+          Dữ liệu được lưu riêng cho bạn và tự động khôi phục khi mở lại.
         </div>
       </div>
     </div>
