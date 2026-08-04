@@ -12,32 +12,31 @@ const STORAGE_KEY = "betting_tool_state_v4";
 const LADDER_TOP = 10000; // trần giữ mốc = 10.000k
 const LADDER_STEP = 1000; // mốc nghìn (1.000k)
 
-// === GIẢM STACK khi vốn quá to (> 50.000k) ===
-// Vào stack khi vốn > 50.000k: đặt thực tế = vốn / hệ số.
-// Hệ số ĐẦU VÒNG theo mốc vốn: 50tr=1.5, 100tr=2, 150tr=2.5, 200tr=3... (mỗi +50.000k
-// thì +0.5). Trong 1 vòng có 5 nấc, hệ số giảm ĐỀU từ base về 1.0 (bước = (base-1)/5).
-// Thua -> chỉ mất số đã nhập, KHÔNG reset hệ số. Đủ 5 thắng: còn >50.000k thì chạy lại
-// vòng (hệ số theo mốc vốn mới), <50.000k thì thoát. Vốn <= 20.000k bỏ stack.
-const STACK_ENTER = 50000; // > mức này thì bật stack
-const STACK_EXIT = 20000; // <= mức này thì tắt stack
-const STACK_TIER = 50000; // mỗi +50.000k vốn thì hệ số đầu vòng +0.5
-const STACK_STEPS = 5; // 5 nấc mỗi vòng
+// === CHIA HỆ SỐ theo mốc vốn khi vốn to ===
+// Bật chế độ chia khi vốn > 50.000k. Hệ số theo mốc: 50tr→1.5, 100tr→2, 150tr→2.5,
+// 200tr→3... mỗi +50.000k thì +0.5 (sàn 1.5).
+// HAI TẦNG: Vốn gốc chạy /1.99 như cũ. Số ĐÁNH (stack) chạy /2 riêng: thắng →
+// (đánh×2 − thắng)/2. Stack < 20.000k thì reset = vốn ÷ hệ số. Stack thua → ×1.5 (theo
+// công thức thua) nhưng CHẶN ở vốn ÷ hệ số. Vốn về ≤ 20.000k thì tắt hẳn chế độ chia.
+const STACK_ENTER = 50000; // > mức này thì BẬT chế độ chia
+const STACK_EXIT = 20000; // vốn <= mức này thì TẮT; stack < mức này thì RESET
+const STACK_TIER = 50000; // mỗi +50.000k vốn thì hệ số +0.5
 
 function round1(x) {
   return Math.round(x * 10) / 10;
 }
 
-// Hệ số đầu vòng theo mốc vốn
-function stackBaseDivisor(capital) {
+// Hệ số chia theo mốc vốn (sàn 1.5)
+function stackDivisor(capital) {
   const tier = Math.max(0, Math.floor((capital - STACK_ENTER) / STACK_TIER));
   return round1(1.5 + 0.5 * tier);
 }
 
-// Hệ số hiện tại = base - bước x số lần đã thắng (bước = (base-1)/5, về 1.0 sau 5 nấc)
-function stackDivFor(base, wins) {
-  const b = base || 1.5;
-  const step = (b - 1) / STACK_STEPS;
-  return round1(b - step * Math.min(Math.max(wins, 0), STACK_STEPS - 1));
+// Bật/tắt chế độ chia có "trễ": bật khi > 50m, tắt khi <= 20m, giữa thì giữ nguyên
+function nextStackActive(prevActive, capital) {
+  if (capital > STACK_ENTER) return true;
+  if (capital <= STACK_EXIT) return false;
+  return prevActive;
 }
 
 function formatMoney(val) {
@@ -91,8 +90,9 @@ export default function App() {
   const [totalWon, setTotalWon] = useState(0);
   const [ladderProfit, setLadderProfit] = useState(0);
   const [stackActive, setStackActive] = useState(false);
-  const [stackWins, setStackWins] = useState(0);
-  const [stackBase, setStackBase] = useState(1.5);
+  const [stackBet, setStackBet] = useState(0);
+  const [stackRung, setStackRung] = useState(0); // mốc hiện tại (0 = chưa lên thang)
+  const [stackStep, setStackStep] = useState(0); // bước cố định = mốc kích hoạt / 10
   const [confirmReset, setConfirmReset] = useState(false);
   const [isLoaded, setIsLoaded] = useState(false);
 
@@ -146,25 +146,17 @@ export default function App() {
           if (parsed.totalWon !== undefined) setTotalWon(parsed.totalWon);
           if (parsed.ladderProfit !== undefined)
             setLadderProfit(parsed.ladderProfit);
-
-          // Khôi phục / tự suy ra trạng thái stack theo mức vốn
           const cap =
             parsed.currentBet !== undefined ? parsed.currentBet : INITIAL_BET;
-          let sa = parsed.stackActive ?? false;
-          let sw = parsed.stackWins ?? 0;
-          let sb = parsed.stackBase ?? 1.5;
-          if (!sa && cap > STACK_ENTER) {
-            sa = true;
-            sw = 0;
-            sb = stackBaseDivisor(cap);
-          }
-          if (sa && cap <= STACK_EXIT) {
-            sa = false;
-            sw = 0;
+          const sa = nextStackActive(parsed.stackActive ?? false, cap);
+          let sb = parsed.stackBet;
+          if (sa && (sb === undefined || sb <= 0)) {
+            sb = round2(cap / stackDivisor(cap));
           }
           setStackActive(sa);
-          setStackWins(sw);
-          setStackBase(sb);
+          setStackBet(sb ?? 0);
+          setStackRung(sa ? (parsed.stackRung ?? 0) : 0);
+          setStackStep(sa ? (parsed.stackStep ?? 0) : 0);
         }
       } catch (e) {
         // Chưa có dữ liệu lưu trước đó - bình thường ở lần chạy đầu
@@ -191,8 +183,9 @@ export default function App() {
           totalWon,
           ladderProfit,
           stackActive,
-          stackWins,
-          stackBase,
+          stackBet,
+          stackRung,
+          stackStep,
         };
         localStorage.setItem(STORAGE_KEY, JSON.stringify(stateToSave));
       } catch (e) {
@@ -207,8 +200,9 @@ export default function App() {
     totalWon,
     ladderProfit,
     stackActive,
-    stackWins,
-    stackBase,
+    stackBet,
+    stackRung,
+    stackStep,
     isLoaded,
   ]);
 
@@ -227,107 +221,76 @@ export default function App() {
     });
   }
 
-  // Hệ số & số tiền ĐẶT thực tế cho lượt này
-  const stackDiv = stackDivFor(stackBase, stackWins);
-  const placedBet = stackActive
-    ? Math.max(0, round2(currentBet / stackDiv))
-    : currentBet;
+  // Hệ số reset & số tiền ĐẶT thực tế cho lượt này
+  const stackDiv = stackActive ? stackDivisor(currentBet) : 1;
+  const placedBet = stackActive ? Math.max(0, round2(stackBet)) : currentBet;
+  // Số đánh khi reset = vốn ÷ hệ số của vốn đó
+  const resetBetFor = (total) => Math.max(0, round2(total / stackDivisor(total)));
+  // Mốc lượt kế: trên thang thì bước cố định; chưa lên thì chọn theo bet vs vốn/10
+  const stackA = stackActive ? round2(currentBet / 10) : 0;
+  const stackNextMilestone = !stackActive
+    ? 0
+    : stackRung > 0
+    ? round2(stackRung - stackStep)
+    : placedBet > stackA
+    ? stackA
+    : round2(placedBet - round2(placedBet / 10));
+  // Stack hiện tại có phải vừa reset từ vốn (để hiển thị nhãn ÷hệ số) không
+  const stackIsFresh =
+    stackActive && Math.abs(placedBet - resetBetFor(currentBet)) < 0.5;
 
-  // Tính lại trạng thái stack sau khi vốn thay đổi (dùng cho thua & sửa vốn)
-  function reconcileStackAfter(nextCapital, keepActive, keepWins, keepBase) {
-    let sa = keepActive;
-    let sw = keepWins;
-    let sb = keepBase;
-    if (!sa && nextCapital > STACK_ENTER) {
-      sa = true;
-      sw = 0;
-      sb = stackBaseDivisor(nextCapital); // vào stack: hệ số theo mốc vốn
+  // Xử lý THUA chung cho cả 3 nút
+  function commitLoss(lost, resultLabel) {
+    const totalNext = Math.max(0, round2(calcNextBetOnLoss(currentBet, lost)));
+    const sa = nextStackActive(stackActive, totalNext);
+    let newStack = 0;
+    if (stackActive) {
+      // Stack thua: tăng theo công thức thua, CHẶN ở vốn ÷ hệ số
+      const grown = Math.max(0, round2(calcNextBetOnLoss(placedBet, lost)));
+      newStack = Math.min(grown, resetBetFor(totalNext));
+    } else if (sa) {
+      // Từ chế độ thường vừa vượt 50m -> vào chia
+      newStack = resetBetFor(totalNext);
     }
-    if (sa && nextCapital <= STACK_EXIT) {
-      sa = false;
-      sw = 0;
-    }
+    const nextPlaced = sa ? newStack : totalNext;
+
+    updateHistory({
+      round,
+      bet: placedBet,
+      capital: stackActive ? currentBet : undefined,
+      div: stackActive ? stackDiv : undefined,
+      stack: stackActive,
+      result: resultLabel,
+      lost,
+      won: 0,
+      nextBet: nextPlaced,
+      time: getTimestamp(),
+    });
+    setTotalLost((p) => p + lost);
+    setCurrentBet(totalNext);
     setStackActive(sa);
-    setStackWins(sw);
-    setStackBase(sb);
+    setStackBet(sa ? newStack : 0);
+    setStackRung(0); // thua -> rời thang, neo lại mốc khi gỡ
+    setStackStep(0);
+    setRound((r) => r + 1);
+    setShowWonInput(false);
+    setShowLoseInput(false);
+    setWonInput("");
+    setLoseInput("");
   }
 
   function handleLose() {
-    const lost = placedBet; // stack: mất phần đã đặt; thường: = currentBet
-    const nextBet = Math.max(0, round2(calcNextBetOnLoss(currentBet, lost)));
-
-    updateHistory({
-      round,
-      bet: placedBet,
-      capital: stackActive ? currentBet : undefined,
-      div: stackActive ? stackDiv : undefined,
-      stack: stackActive,
-      result: "thua hết",
-      lost,
-      won: 0,
-      nextBet,
-      time: getTimestamp(),
-    });
-    setTotalLost((p) => p + lost);
-    setCurrentBet(nextBet);
-    reconcileStackAfter(nextBet, stackActive, stackWins, stackBase); // thua không reset nấc
-    setRound((r) => r + 1);
-    setShowWonInput(false);
-    setShowLoseInput(false);
-    setWonInput("");
-    setLoseInput("");
+    commitLoss(placedBet, "thua hết");
   }
 
   function handleHalfLose() {
-    const lost = placedBet / 2;
-    const nextBet = Math.max(0, round2(calcNextBetOnLoss(currentBet, lost)));
-
-    updateHistory({
-      round,
-      bet: placedBet,
-      capital: stackActive ? currentBet : undefined,
-      div: stackActive ? stackDiv : undefined,
-      stack: stackActive,
-      result: "thua nửa",
-      lost,
-      won: 0,
-      nextBet,
-      time: getTimestamp(),
-    });
-    setTotalLost((p) => p + lost);
-    setCurrentBet(nextBet);
-    reconcileStackAfter(nextBet, stackActive, stackWins, stackBase);
-    setRound((r) => r + 1);
-    setShowWonInput(false);
-    setShowLoseInput(false);
-    setWonInput("");
-    setLoseInput("");
+    commitLoss(placedBet / 2, "thua nửa");
   }
 
   function handleLoseConfirm() {
     const raw = parseFloat(loseInput);
     if (isNaN(raw) || raw <= 0) return;
-    const lost = raw; // Thua khác: không giới hạn
-    const nextBet = Math.max(0, round2(calcNextBetOnLoss(currentBet, lost)));
-
-    updateHistory({
-      round,
-      bet: placedBet,
-      capital: stackActive ? currentBet : undefined,
-      div: stackActive ? stackDiv : undefined,
-      stack: stackActive,
-      result: "thua khác",
-      lost,
-      won: 0,
-      nextBet,
-      time: getTimestamp(),
-    });
-    setTotalLost((p) => p + lost);
-    setCurrentBet(nextBet);
-    reconcileStackAfter(nextBet, stackActive, stackWins, stackBase);
-    setRound((r) => r + 1);
-    setShowLoseInput(false);
-    setLoseInput("");
+    commitLoss(raw, "thua khác"); // không giới hạn
   }
 
   function handleWinConfirm() {
@@ -335,26 +298,54 @@ export default function App() {
     if (isNaN(won) || won <= 0) return;
 
     if (stackActive) {
-      // Trong stack: vốn cập nhật theo công thức, giảm 1 nấc hệ số, không rút thang
-      const newCap = Math.max(0, round2(calcNextBetOnWin(currentBet, won)));
-      let sw = stackWins + 1;
-      let sa = true;
-      let sb = stackBase;
-      if (sw >= STACK_STEPS) {
-        // đủ 5 thắng: còn >50.000k thì chạy lại vòng (hệ số theo mốc vốn mới)
-        if (newCap >= STACK_ENTER) {
-          sw = 0;
-          sb = stackBaseDivisor(newCap);
+      // TẦNG 1 - vốn gốc /1.99 ; TẦNG 2 - số đánh /2 ; MỐC bước CỐ ĐỊNH
+      const totalF = Math.max(0, round2(calcNextBetOnWin(currentBet, won)));
+      const stackF = Math.max(0, round2((placedBet * 2 - won) / 2));
+      // Trên thang: bước cố định. Chưa lên thang: chọn mốc theo bet vs vốn/10
+      let step;
+      let milestone;
+      if (stackRung > 0) {
+        step = stackStep;
+        milestone = round2(stackRung - stackStep);
+      } else {
+        const A = round2(currentBet / 10); // vốn/10
+        if (placedBet > A) {
+          // bet to (thua nhiều) -> kéo về vốn/10, bước = vốn/100
+          step = round2(A / 10);
+          milestone = A;
         } else {
-          sa = false;
-          sw = 0;
+          // bet nhỏ (đang an toàn) -> đi thang xuống từ bet, bước = bet/10
+          step = round2(placedBet / 10);
+          milestone = round2(placedBet - step);
         }
       }
-      if (newCap <= STACK_EXIT) {
-        // về vùng an toàn -> bỏ hẳn stack
-        sa = false;
-        sw = 0;
+
+      let newTotal = totalF;
+      let newStack;
+      let newRung;
+      let newStep;
+      let lai = 0;
+      if (milestone > 0 && stackF <= milestone) {
+        // Giữ ở mốc (kể cả khi công thức = mốc -> lên thang tại đây)
+        newStack = milestone;
+        lai = round2(milestone - stackF);
+        newTotal = Math.max(0, round2(totalF - lai));
+        newRung = milestone;
+        newStep = step;
+      } else {
+        // Thắng ít -> đi theo công thức /2, giữ nguyên thang
+        newStack = stackF;
+        newRung = stackRung;
+        newStep = stackStep;
       }
+
+      const sa = nextStackActive(true, newTotal); // dựa trên vốn đã trừ lãi
+      if (!sa) {
+        newStack = 0;
+        newRung = 0;
+        newStep = 0;
+      }
+      const nextPlaced = sa ? newStack : newTotal;
 
       updateHistory({
         round,
@@ -364,14 +355,16 @@ export default function App() {
         stack: true,
         result: "thắng",
         won,
-        nextBet: newCap,
+        lai: lai > 0 ? lai : undefined,
+        nextBet: nextPlaced,
         time: getTimestamp(),
       });
       setTotalWon((p) => p + won);
-      setCurrentBet(newCap);
+      setCurrentBet(newTotal);
       setStackActive(sa);
-      setStackWins(sw);
-      setStackBase(sb);
+      setStackBet(sa ? newStack : 0);
+      setStackRung(sa ? newRung : 0);
+      setStackStep(sa ? newStep : 0);
       setRound((r) => r + 1);
       setShowWonInput(false);
       setWonInput("");
@@ -412,8 +405,12 @@ export default function App() {
     const newBet = parseFloat(editBetInput);
     if (!isNaN(newBet) && newBet >= 0) {
       const b = round2(newBet);
+      const sa = nextStackActive(stackActive, b);
       setCurrentBet(b);
-      reconcileStackAfter(b, stackActive, stackWins, stackBase);
+      setStackActive(sa);
+      setStackBet(sa ? resetBetFor(b) : 0);
+      setStackRung(0);
+      setStackStep(0);
       setIsEditingBet(false);
     }
   }
@@ -430,8 +427,9 @@ export default function App() {
     setTotalWon(0);
     setLadderProfit(0);
     setStackActive(false);
-    setStackWins(0);
-    setStackBase(1.5);
+    setStackBet(0);
+    setStackRung(0);
+    setStackStep(0);
     setShowWithdrawInput(false);
     setWithdrawInput("");
     setConfirmReset(false);
@@ -453,12 +451,21 @@ export default function App() {
   const winNextPreview = winPreview.nextBet;
   const winGainPreview = winPreview.gain;
 
-  // Dự tính khi THẮNG trong stack mode
-  const winStackNext = Math.max(
+  // Dự tính khi THẮNG trong stack mode (2 tầng + mốc bậc thang)
+  const winTotalF = Math.max(
     0,
     round2(calcNextBetOnWin(currentBet, wonInputVal))
   );
-  const winStackNextDiv = stackDivFor(stackBase, Math.min(stackWins + 1, STACK_STEPS - 1));
+  const winStackF = Math.max(0, round2((placedBet * 2 - wonInputVal) / 2));
+  const winMilestone = stackNextMilestone;
+  const winHold = winMilestone > 0 && winStackF <= winMilestone;
+  const winLai = winHold ? round2(winMilestone - winStackF) : 0;
+  const winTotalNext = winHold ? Math.max(0, round2(winTotalF - winLai)) : winTotalF;
+  const winNextActive = nextStackActive(true, winTotalNext);
+  let winNextPlaced = winHold ? winMilestone : winStackF;
+  if (!winNextActive) {
+    winNextPlaced = winTotalNext;
+  }
 
   // Premium Luxury Color Palette (Midnight Sapphire & Brushed Gold Accents)
   const colors = {
@@ -667,7 +674,7 @@ export default function App() {
               <span
                 style={{ fontSize: 12, color: colors.green, fontWeight: 700 }}
               >
-                🎯 ĐÁNH LƯỢT NÀY (÷{stackDiv})
+                🎯 ĐÁNH LƯỢT NÀY {stackIsFresh ? `(÷${stackDiv})` : "(stack /2)"}
               </span>
               <span
                 style={{ fontSize: 22, color: colors.green, fontWeight: 900 }}
@@ -690,9 +697,14 @@ export default function App() {
                 fontWeight: 700,
               }}
             >
-              Giảm stack (vốn &gt; 50.000k) · hệ số {stackDiv} · đã thắng{" "}
-              {stackWins}/5. Thắng → giảm hệ số &amp; vốn theo /1.99; vốn ≤
-              20.000k thì bỏ stack.
+              Số đánh chạy /2 · mốc kế {formatMoney(stackNextMilestone)}
+              {stackRung > 0
+                ? ` (bước cố định ${formatMoney(stackStep)})`
+                : placedBet > stackA
+                ? ` (bet > vốn/10 → kéo về ${formatMoney(stackA)})`
+                : ` (đi thang từ bet, bước ${formatMoney(round2(placedBet / 10))})`}
+              . Giữ mốc thì phần dư cộng vào vốn gốc để giảm âm; vốn ≤ 20tr thì thôi
+              chia.
             </div>
           )}
 
@@ -1019,25 +1031,24 @@ export default function App() {
               >
                 Dự kiến lượt kế tiếp:{" "}
                 <span style={{ color: colors.gold, fontWeight: 700 }}>
-                  {formatMoney(stackActive ? winStackNext : winNextPreview)}
+                  {formatMoney(stackActive ? winTotalNext : winNextPreview)}
                 </span>
                 <br />
                 {stackActive ? (
                   <>
                     <span style={{ fontStyle: "italic" }}>
-                      Vốn mới = ( {formatMoney(currentBet)} × 2 −{" "}
-                      {formatMoney(wonInputVal)} ) / 1.99
+                      Đánh /2 = {formatMoney(winStackF)} · mốc{" "}
+                      {formatMoney(winMilestone)}
+                      {winHold
+                        ? ` → giữ mốc, +${formatMoney(winLai)} vào vốn gốc`
+                        : " → theo công thức"}
                     </span>
                     <br />
                     <span style={{ color: colors.green, fontWeight: 700 }}>
-                      🎯 Stack: thắng {stackWins + 1}/5
-                    </span>{" "}
-                    <span style={{ fontStyle: "italic" }}>
-                      {stackWins + 1 >= STACK_STEPS
-                        ? "(hết 5 nấc — về/chạy lại tuỳ mức vốn)"
-                        : `→ hệ số kế tiếp ${winStackNextDiv}, đặt ~${formatMoney(
-                            round2((winStackNext || 0) / winStackNextDiv)
-                          )}`}
+                      🎯 Đánh lượt kế:{" "}
+                      {!winNextActive
+                        ? `${formatMoney(winNextPlaced)} (thoát chia)`
+                        : `${formatMoney(winNextPlaced)}`}
                     </span>
                   </>
                 ) : winWillLadder ? (
@@ -1373,6 +1384,7 @@ export default function App() {
                             }}
                           >
                             🎯 Stack · vốn {formatMoney(h.capital)} ÷ {h.div}
+                            {h.lai ? ` · +${formatMoney(h.lai)} giảm âm` : ""}
                           </div>
                         )}
                         {h.ladder && (
@@ -1539,10 +1551,12 @@ export default function App() {
           <br />
           Lãi rút thang = ( số về − số công thức ) × 2, cộng dồn & có thể rút ra.
           <br />
-          Giảm stack: vốn &gt; 50.000k → đặt = vốn ÷ hệ số. Hệ số đầu vòng theo
-          mốc vốn (50tr→1.5, 100tr→2, 150tr→2.5, 200tr→3... mỗi +50tr thì +0.5),
-          trong vòng 5 nấc giảm đều về 1.0. Thua chỉ mất số đã nhập, không reset.
-          Vốn ≤ 20.000k bỏ stack.
+          Chia 2 tầng (vốn &gt; 50.000k): vốn gốc chạy /1.99; số ĐÁNH chạy /2 riêng.
+          Chọn mốc bậc thang: nếu bet &gt; vốn/10 (thua nhiều) → kéo về vốn/10, bước
+          vốn/100; nếu bet ≤ vốn/10 (đang nhỏ) → đi thang xuống từ bet, bước bet/10.
+          Trong chuỗi thắng giữ nguyên bước. Công thức /2 ≤ mốc → giữ ở mốc, phần dư
+          cộng vào vốn gốc để giảm âm. Thua → ×1.5 và chọn lại mốc khi gỡ. Vốn ≤
+          20.000k thì thôi chia.
           <br />
           Dữ liệu được lưu riêng cho bạn và tự động khôi phục khi mở lại.
         </div>
