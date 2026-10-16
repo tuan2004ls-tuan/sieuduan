@@ -9,8 +9,8 @@ const STORAGE_KEY = "betting_tool_state_v4";
 // Khi THẮNG: nếu số công thức rơi xuống DƯỚI mốc đang giữ -> về đúng mốc đó,
 // phần dư vào "Lãi rút thang" = (mốc - số công thức) x 2. Nếu không thì giữ số công thức
 // (thắng ít -> đi theo công thức, VD 10.000k thắng nhỏ -> 9.949k, chưa xuống 9.000k).
-const LADDER_TOP = 10000; // trần giữ mốc = 10.000k
-const LADDER_STEP = 1000; // mốc nghìn (1.000k)
+const LADDER_TOP = 5000; // trần giữ mốc = 10.000k
+const LADDER_STEP = 5000; // mốc nghìn (1.000k)
 
 // === CHIA HỆ SỐ theo mốc vốn khi vốn to ===
 // Bật chế độ chia khi vốn > 50.000k. Hệ số theo mốc: 50tr→1.5, 100tr→2, 150tr→2.5,
